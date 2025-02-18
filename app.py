@@ -3,6 +3,7 @@ import numpy as np
 import warnings  
 import streamlit as st  
 import matplotlib.pyplot as plt  
+from influxdb_client import InfluxDBClient, Point, WriteOptions  
 
 # Suppress warnings  
 warnings.filterwarnings('ignore')  
@@ -18,8 +19,68 @@ from tensorflow import keras
 from tensorflow.keras import layers, models  
 from tensorflow.keras.callbacks import EarlyStopping  
 
-# ARIMA imports  
-from statsmodels.tsa.arima.model import ARIMA  
+# InfluxDB Cloud configuration  
+INFLUXDB_URL = "https://us-east-1-1.aws.cloud2.influxdata.com"  # Replace with your InfluxDB Cloud URL  
+INFLUXDB_TOKEN = "Pbc2JTLxSKkRRK5Qsx30g7GrpXBD_9SFqIsq_pYXOfOCue8qsp8CQiQzJFuhAJ0e9Jc4zDXx47CG3lLPwPrNRQ=="  # Replace with your API token  
+INFLUXDB_ORG = "rvce"  # Replace with your organization name  
+INFLUXDB_BUCKET = "_tasks"  # Replace with your bucket name  
+
+# Inject custom CSS for dark theme  
+def inject_custom_css():  
+    st.markdown(  
+        """  
+          <style>  
+            body {  
+                background-color: #1E1E2F;  
+                color: #FFFFFF;  
+                overflow: hidden;  
+            }  
+           
+            .stButton button {  
+                background-color: #3B82F6 !important;  
+                color: white !important;  
+                border-radius: 0.375rem !important;  
+                padding: 0.5rem 1rem !important;  
+                font-weight: 500 !important;  
+            }  
+            .stButton button:hover {  
+                background-color: #2563EB !important;  
+            }  
+            .stDataFrame {  
+                border-radius: 0.375rem !important;  
+                box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5) !important;  
+                background-color: #2A2A3C !important;  
+                color: #FFFFFF !important;  
+            }  
+            .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {  
+                color: #FFFFFF !important;  
+            }  
+            .stFileUploader {  
+                border: 1px solid #E5E7EB !important;  
+                border-radius: 0.375rem !important;  
+                padding: 1rem !important;  
+                background-color: #2A2A3C !important;  
+                color: #FFFFFF !important;  
+            }  
+            .stFileUploader:hover {  
+                border-color: #3B82F6 !important;  
+            }  
+            .stTextInput input {  
+                background-color: #2A2A3C !important;  
+                color: #FFFFFF !important;  
+                border: 1px solid #3B82F6 !important;  
+            }  
+            .stTextInput input:focus {  
+                border-color: #2563EB !important;  
+            }  
+            /* Change font color of file uploader labels to white */  
+            .stFileUploader label {  
+                color: #FFFFFF !important;  
+            }  
+        </style>  
+        """,  
+        unsafe_allow_html=True,  
+    )  
 
 class AnomalyDetector:  
     def __init__(self, train_file):  
@@ -151,13 +212,42 @@ class AnomalyDetector:
             y_pred = (self.rnn_model.predict(X_test_rnn) > 0.5).astype(int)  
             
             st.write("🤖 RNN Model Evaluation:")  
-            st.write(classification_report(self.y_test, y_pred))  
+            styled_report = self.format_classification_report(self.y_test, y_pred)  
+            st.dataframe(styled_report)  
             
             return self  
         
         except Exception as e:  
             st.error(f"RNN Model Training Error: {e}")  
             raise  
+    
+    def format_classification_report(self, y_true, y_pred):  
+        """  
+        Format the classification report as a styled DataFrame.  
+        """  
+        # Generate the classification report  
+        report = classification_report(y_true, y_pred, output_dict=True)  
+        
+        # Convert the report to a DataFrame  
+        df = pd.DataFrame(report).transpose()  
+        
+        # Round the values for better readability  
+        df = df.round(2)  
+        
+        # Add a 'Support' column for better clarity  
+        df['Support'] = df['support'].astype(int)  
+        df.drop(columns=['support'], inplace=True)  
+        
+        # Style the DataFrame  
+        styled_df = df.style \
+            .applymap(lambda x: 'color: green' if x > 0.9 else 'color: orange' if x > 0.7 else 'color: red') \
+            .set_properties(**{'text-align': 'center'}) \
+            .set_table_styles([  
+                {'selector': 'th', 'props': [('background-color', '#4CAF50'), ('color', 'white')]},  
+                {'selector': 'td', 'props': [('font-size', '14px')]}  
+            ])  
+        
+        return styled_df  
     
     def predict_anomalies_rnn(self, test_file):  
         """  
@@ -232,7 +322,23 @@ class AnomalyDetector:
         plt.colorbar(label='Anomaly')  
         st.pyplot(plt)  
 
+def write_to_influxdb(dataframe, measurement_name):  
+    """Write a DataFrame to InfluxDB Cloud."""  
+    with InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG) as client:  
+        write_api = client.write_api(write_options=WriteOptions(batch_size=1000))  
+        points = []  
+        for index, row in dataframe.iterrows():  
+            point = Point(measurement_name)  
+            for col in dataframe.columns:  
+                point.field(col, row[col])  
+            points.append(point)  
+        write_api.write(bucket=INFLUXDB_BUCKET, record=points)  
+        write_api.close()  
+
 def main():  
+    # Inject custom CSS for dark theme  
+    inject_custom_css()  
+    
     st.title("🔍 Anomaly Detection in Network Data 🚀")  
     
     # File uploaders  
@@ -253,6 +359,11 @@ def main():
             # Initialize detector  
             detector = AnomalyDetector(train_file)  
             
+            # Write training data to InfluxDB Cloud  
+            st.write("📤 Writing Training Data to InfluxDB Cloud...")  
+            write_to_influxdb(detector.train_df, "training_data")  
+            st.success("Training data successfully written to InfluxDB Cloud!")  
+            
             # Training RNN Model  
             st.write("🛠️ Training RNN Model...")  
             detector.train_rnn_model(epochs=50)  
@@ -260,6 +371,11 @@ def main():
             # RNN Predictions  
             st.write("🔍 Predicting Anomalies using RNN...")  
             rnn_results = detector.predict_anomalies_rnn(test_file)  
+            
+            # Write prediction results to InfluxDB Cloud  
+            st.write("📤 Writing Prediction Results to InfluxDB Cloud...")  
+            write_to_influxdb(rnn_results['predictions'], "rnn_predictions")  
+            st.success("Prediction results successfully written to InfluxDB Cloud!")  
             
             # Display Results  
             st.write("🤖 RNN Anomaly Predictions:")  
@@ -282,4 +398,4 @@ def main():
                      "- Incompatible data types")  
 
 if __name__ == '__main__':  
-    main()
+    main()  
