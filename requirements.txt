@@ -5,3 +5,4 @@ scikit-learn
 tensorflow  
 statsmodels  
 matplotlib
+influxdb-client
